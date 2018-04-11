@@ -2,6 +2,7 @@ library(raster)
 library(survival)
 library(tidyverse)
 library(moveHMM)
+library(lme4)
 
 ####################################################################
 ############                Functions                 ##############
@@ -78,21 +79,168 @@ HMM <- function(data, states = 3) {
   return(mod)
 }
 
+movement <- function(xy, step, heading) {
+  
+  pi = 3.141593
+  x_init <- xy[1,1]
+  y_init <- xy[1,2]
+  
+  if (heading < 0) {
+    heading <- abs(heading) + pi
+  }
+  
+  #rad_y <- angle*0.0174532925
+  y_change <- sin(heading)*step
+  y_new <- y_init + y_change
+  
+  # Use cosine to determine the movement in x (longitude)
+  #rad_x <- angle*0.0174532925
+  x_change <- cos(heading)*step
+  x_new <- x_init + x_change
+  
+  x_init <- x_new
+  y_init <- y_new
+  
+  move.temp <- as.data.frame(matrix(0,1,2))
+  move.temp[1,1] <- x_new
+  move.temp[1,2] <- y_new
+  
+  return(move.temp)
+}
+
+initialize.states <- function(N) {
+  state.vector <- data.frame(matrix(0,N,1))
+  for (i in 1:N) {
+    rand <- runif(1,0,1)
+    if (rand < 0.08007182) {
+      state.vector[i,1] <- 1
+    } else if (rand > 0.08007181 && rand < 0.6216637) {
+      state.vector[i,1] <- 2
+    } else {
+      state.vector[i,1] <- 3
+    }
+  }
+  colnames(state.vector) <- c('behav.state')
+  return(state.vector)
+}
+
+initialize.agents <- function(N, sp.mean, SSFs, input.stack, pred_df) {
+  
+  traits <- data.frame(matrix(0,N,6)) #traitframe
+  state.vector <- initialize.states(N)
+  forage.maps <- list()
+  directed.maps <- list()
+  
+  # Loop over individuals of a given species
+  for (j in 1:N) {
+    
+    # Derive individual preference maps based on selection function
+    foraging.coeff <- SSFs[[1]]$coefficients
+    directed.coeff <- SSFs[[2]]$coefficients
+    
+    new.foraging.coeff <- foraging.coeff + rnorm(4,0,0.05)
+    new.directed.coeff <- directed.coeff + rnorm(4,0,0.05)
+    
+    SSFs[[1]]$coefficients <- new.foraging.coeff
+    SSFs[[2]]$coefficients <- new.directed.coeff
+  
+    pred <- raster(input.stack@layers[[1]])
+    pred[] <- 0
+    
+    forage_pred <- predict(object=SSFs[[1]], newdata=pred_df, type='risk')
+    directed_pred <- predict(object=SSFs[[2]], newdata=pred_df, type='risk')
+    
+    pred@data@values <- forage_pred
+    pred <- pred/(1 + pred)
+    v_forage <- velox(pred)
+    forage.maps[[j]] <- v_forage
+    
+    pred@data@values <- directed_pred
+    pred <- pred/(1 + pred)
+    v_directed <- velox(pred)
+    directed.maps[[j]] <- v_directed
+    
+    current.state <- state.vector[j,1]
+    
+    # Use individual selection raster to probabilistically set starting location location
+    if (current.state < 3) {
+      selection.raster <- v_forage$as.RasterLayer(band=1)
+    } else if (current.state == 3) {
+      selection.raster <- v_directed$as.RasterLayer(band=1)
+    }
+    x <- getValues(selection.raster)
+    x[is.na(x)] <- 0
+    cellID <- sample(nrow(selection.raster)*ncol(selection.raster), size=1, prob=x)
+    rast.temp <- raster(selection.raster)
+    rast.temp[cellID] <- 1
+    
+    points <- data.frame(rasterToPoints(samp.raster, fun=function(x){x == 1}))[,1:2]
+    points[1,1] <- points[1,1] + runif(1,-14.99,14.99)
+    points[1,2] <- points[1,2] + runif(1,-14.99,14.99)
+    #points <- SpatialPoints(points)
+  
+    size <- rnorm(1,sp.mean,sp.mean/8) 
+    infected <- 0
+
+    traits[j,1] <- j
+    traits[j,2] <- size
+    traits[j,3] <- infected
+    traits[j,4] <- current.state
+    traits[j,5] <- points[1,1]
+    traits[j,6] <- points[1,2]
+  }
+  colnames(traits) <- c('ID', 'body.mass', 'infected', 'behav.state', 'x', 'y')
+  ind.out <- list(traits, forage.maps, directed.maps)
+  
+  return(ind.out)
+}
+
+state.shift <- function(N, prev.vector, trans.mat) {
+  state.vector <- data.frame(matrix(0,N,1))
+  
+  for (j in 1:N) {
+    if (prev.vector[j] == 1) {
+      probs = trans.mat[1,]
+    } else if (prev.vector[j] == 2) {
+      probs = trans.mat[2,]
+    } else if (prev.vector[j] == 3) {
+      probs = trans.mat[3,]
+    }
+    
+    state.vector[j,1] <- sample(c(1,2,3), size=1, prob=probs)
+  }
+  colnames(state.vector) <- 'behav.state'
+  return(state.vector)
+}
+
+anglefun <- function(xx, yy, bearing=TRUE) {
+  ## calculates the compass bearing of the line between two points
+  ## xx and yy are the differences in x and y coordinates between two points
+  ## Options:
+  ## bearing = FALSE returns +/- pi instead of 0:2*pi
+  
+  b<-sign(yy)
+  b[b==0]<-1  #corrects for the fact that sign(0) == 0
+  tempangle = b*(xx<0)*pi+atan(yy/xx)
+  if(bearing){
+    #return a compass bearing 0 to 2pi
+    #if bearing==FALSE then a heading (+/- pi) is returned
+    tempangle[tempangle<0]<-tempangle[tempangle<0]+2*pi
+  }
+  return(tempangle)
+}
+
+
+
 ####################################################################
 
 name_list = c('AG059_2009', 'AG061_2009', 'AG062_2009', 'AG063_2009',
               'AG068_2009', 'AG063_2010', 'AG068_2010', 'AG252_2010',
               'AG253_2010', 'AG255_2010', 'AG256_2010')
 
-risk09 <- raster('Layers/Anthrax_Risk_noNA_2009.tif')
-risk10 <- raster('Layers/Anthrax_Risk_noNA_2010.tif')
-risk_mean <- mean(risk09, risk10)
+date_list = c('20160213', '20160325', '20160426', '20160528', '20160629')
 
-LIZs <- weighted_sampling(input.raster = risk_mean, N = 200)
-SSFs <- selection_functions(name.list = name_list)
-foraging.coeff <- SSFs[[1]]$coefficients
-directed.coeff <- SSFs[[2]]$coefficients
-
+# Run general HMM across all 11 zebra tracks during the anthrax season
 zebra09 <- read_csv("Zebra_Data/Zebra_Anthrax_2009_Cleaned.csv") %>%
   dplyr::select(x,y,date,ID) 
 zebra10 <- read_csv("Zebra_Data/Zebra_Anthrax_2010_Cleaned.csv") %>%
@@ -101,5 +249,51 @@ all_data <- rbind(zebra09, zebra10)
 
 HMMs <- HMM(data = all_data, states = 3)
 trans.mat <- HMMs$mle$gamma
+
+# Import predictor layers, create raster stack, normalize variables and create dataframe
+Risk <- raster('Layers/Mean_Risk.tif')
+road_dens <- raster('Layers/Road_Density.tif')
+Green <- raster(paste0('Layers/Greenness_', date_list[1], ".tif"))
+Wet <- raster(paste0('Layers/Wetness_', date_list[1], ".tif"))
+
+pred_stack <- stack(Green, Wet, road_dens, Risk)
+
+stack_means <- cellStats(pred_stack, stat='mean', na.rm=TRUE)
+stack_sd <- cellStats(pred_stack, stat='sd', na.rm=TRUE)
+
+norm_stack <- stack((Green - stack_means) / stack_sd[1],
+                    (Wet - stack_means[2]) / stack_sd[2],
+                    (road_dens - stack_means[3])/ stack_sd[3],
+                    (Risk - stack_means[4])/ stack_sd[4])
+
+norm_stack <- stack(norm_stack@layers[[1]],
+                    norm_stack@layers[[2]],
+                    norm_stack@layers[[3]],
+                    norm_stack@layers[[4]])
+names(norm_stack) <- c("Green_Norm", "Wet_Norm", "Road_Dens_Norm", "Risk_Norm")
+
+pred_df <- as.data.frame(norm_stack)
+pred_df$fix <- 1
+pred_df$ID <- "AG068_2009"
+
+#### Data Recorders ####
+
+behav.states <- data.frame(matrix(0,N,days*(steps.per.day/3)))
+
+#### Initialization ####
+
+LIZs <- weighted_sampling(input.raster = Risk, N = 200)
+SSFs <- selection_functions(name.list = name_list)
+agents <- initialize.agents(N=20, sp.mean=350, SSFs, norm_stack, pred_df)
+
+#### Model Implementation ###
+
+prev.state <- agents[[1]]$behav.state
+new.states <- state.shift(N, prev.state, trans.mat)
+behav.states[,1] <- new.states
+
+#################################################################
+
+
 
 
