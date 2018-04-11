@@ -2,7 +2,7 @@ library(raster)
 library(survival)
 library(tidyverse)
 library(moveHMM)
-library(lme4)
+library(rgeos)
 
 ####################################################################
 ############                Functions                 ##############
@@ -79,35 +79,6 @@ HMM <- function(data, states = 3) {
   return(mod)
 }
 
-movement <- function(xy, step, heading) {
-  
-  pi = 3.141593
-  x_init <- xy[1,1]
-  y_init <- xy[1,2]
-  
-  if (heading < 0) {
-    heading <- abs(heading) + pi
-  }
-  
-  #rad_y <- angle*0.0174532925
-  y_change <- sin(heading)*step
-  y_new <- y_init + y_change
-  
-  # Use cosine to determine the movement in x (longitude)
-  #rad_x <- angle*0.0174532925
-  x_change <- cos(heading)*step
-  x_new <- x_init + x_change
-  
-  x_init <- x_new
-  y_init <- y_new
-  
-  move.temp <- as.data.frame(matrix(0,1,2))
-  move.temp[1,1] <- x_new
-  move.temp[1,2] <- y_new
-  
-  return(move.temp)
-}
-
 initialize.states <- function(N) {
   state.vector <- data.frame(matrix(0,N,1))
   for (i in 1:N) {
@@ -174,7 +145,7 @@ initialize.agents <- function(N, sp.mean, SSFs, input.stack, pred_df) {
     rast.temp <- raster(selection.raster)
     rast.temp[cellID] <- 1
     
-    points <- data.frame(rasterToPoints(samp.raster, fun=function(x){x == 1}))[,1:2]
+    points <- data.frame(rasterToPoints(rast.temp, fun=function(x){x == 1}))[,1:2]
     points[1,1] <- points[1,1] + runif(1,-14.99,14.99)
     points[1,2] <- points[1,2] + runif(1,-14.99,14.99)
     #points <- SpatialPoints(points)
@@ -213,6 +184,23 @@ state.shift <- function(N, prev.vector, trans.mat) {
   return(state.vector)
 }
 
+extract.ranges <- function(HMM.out, states = 3) {
+  ranges <- data.frame(matrix(0,states,3))
+  for (i in 1:states) {
+    step.mean <- HMM.out$mle[[1]][1,i]
+    step.sd <- HMM.out$mle[[1]][2,i]
+    step.shape <- (step.mean^2)/(step.sd^2)
+    step.rate <- step.mean/(step.sd^2)
+    radius <- qgamma(0.975, shape=step.shape, rate=step.rate)
+    
+    ranges[i,1] <- step.shape
+    ranges[i,2] <- step.rate
+    ranges[i,3] <- radius
+  }
+  colnames(ranges) <- c('gamma.shape', 'gamma.rate', 'radius')
+  return(ranges)
+}
+
 anglefun <- function(xx, yy, bearing=TRUE) {
   ## calculates the compass bearing of the line between two points
   ## xx and yy are the differences in x and y coordinates between two points
@@ -230,7 +218,79 @@ anglefun <- function(xx, yy, bearing=TRUE) {
   return(tempangle)
 }
 
+movement <- function(xy, step, heading) {
+  
+  pi = 3.141593
+  x_init <- xy[1,1]
+  y_init <- xy[1,2]
+  
+  if (heading < 0) {
+    heading <- abs(heading) + pi
+  }
+  
+  #rad_y <- angle*0.0174532925
+  y_change <- sin(heading)*step
+  y_new <- y_init + y_change
+  
+  # Use cosine to determine the movement in x (longitude)
+  #rad_x <- angle*0.0174532925
+  x_change <- cos(heading)*step
+  x_new <- x_init + x_change
+  
+  x_init <- x_new
+  y_init <- y_new
+  
+  move.temp <- as.data.frame(matrix(0,1,2))
+  move.temp[1,1] <- x_new
+  move.temp[1,2] <- y_new
+  
+  return(move.temp)
+}
 
+move.func <- function(N, inds, sp.mean, ranges, crs, v_bg) {
+  
+  moves <- data.frame(matrix(0,N,2))
+  state.vector <- inds[[1]][,'behav.state']
+  body.size <- inds[[1]][,'body.mass']
+  
+  for (j in 1:N) {
+    curr.pos <- data.frame(inds[[1]][j,c('x','y')])
+    curr.pos <- st_as_sf(curr.pos, coords = 1:2, crs = crs)
+    curr.state <- state.vector[j]
+    radius <- ranges[curr.state,3]
+    percep.range <- (body.size[j]/sp.mean) * radius
+    perception <- st_buffer(curr.pos, dist=percep.range)
+    
+    if (curr.state == 2) {
+      v_selection <- inds[[2]][[j]]$copy()
+    } else if (curr.state == 3) {
+      v_selection <- inds[[3]][[j]]$copy()
+    } else {
+      v_selection <- v_bg$copy()
+    }
+    
+    # Agents move probablistically according to their selection map within their perceptual range
+    v_selection$crop(perception)
+    coords <- data.frame(v_selection$getCoordinates()) %>%
+      st_as_sf(coords=1:2, crs=crs) %>%
+      st_intersection(., perception)
+    
+    nearby <- v_selection$extract(perception, df=TRUE)
+    temp.pt <- sample(1:nrow(nearby), size=1, prob = nearby[,2])
+    cell.center <- coords[temp.pt,] + runif(2, -14.99, 14.99)
+    
+    # Agents could move to the next cell with some error
+    #diff_x <- st_coordinates(cell.center)[1] - st_coordinates(curr.pos)[1]
+    #diff_y <- st_coordinates(cell.center)[2] - st_coordinates(curr.pos)[2]
+    #heading <- anglefun(diff_x, diff_y)
+    #dist <- sqrt(diff_x^2 + diff_y^2) + rnorm(1,0,30)
+    #move <- movement(st_coordinates(curr.pos), dist, heading)
+    
+    moves[j,] <- st_coordinates(cell.center$geometry)
+  }
+  colnames(moves) <- c('x', 'y')
+  return(moves)
+}
 
 ####################################################################
 
@@ -241,20 +301,43 @@ name_list = c('AG059_2009', 'AG061_2009', 'AG062_2009', 'AG063_2009',
 date_list = c('20160213', '20160325', '20160426', '20160528', '20160629')
 
 # Run general HMM across all 11 zebra tracks during the anthrax season
-zebra09 <- read_csv("Zebra_Data/Zebra_Anthrax_2009_Cleaned.csv") %>%
-  dplyr::select(x,y,date,ID) 
-zebra10 <- read_csv("Zebra_Data/Zebra_Anthrax_2010_Cleaned.csv") %>%
-  dplyr::select(x,y,date,ID)
+zebra09 <- read_csv("Zebra_Data/Zebra_Anthrax_2009_Cleaned.csv") %>% 
+  dplyr::select(x,y,date,ID) %>% 
+  dplyr::filter(!is.na(x)) %>%
+  st_as_sf(., coords = 1:2, crs = "+init=epsg:32733")
+
+zebra10 <- read_csv("Zebra_Data/Zebra_Anthrax_2010_Cleaned.csv") %>% 
+  dplyr::select(x,y,date,ID) %>% 
+  dplyr::filter(!is.na(x)) %>%
+  st_as_sf(., coords = 1:2, crs = "+init=epsg:32733")
+
 all_data <- rbind(zebra09, zebra10)
 
-HMMs <- HMM(data = all_data, states = 3)
-trans.mat <- HMMs$mle$gamma
+zebra.ext <- extent(c(extent(zebra10)@xmin - 5000,
+                      extent(zebra10)@xmax + 5000,
+                      extent(zebra09)@ymin - 5000,
+                      extent(zebra10)@ymax + 5000))
+
+zebra_ext <- as(zebra.ext, 'SpatialPolygons')
+crs(zebra_ext) <- '+init=epsg:32733'
+zebra_ext <- st_as_sf(zebra_ext)
+
+ENP <- read_sf('Layers/enp fence poly.shp')
+ENP_crs <- st_crs(ENP, '+proj=longlat')
+st_crs(ENP) <- ENP_crs
+ENP <- st_transform(ENP, '+init=epsg:32733') %>%
+  st_union(.) %>% st_intersection(zebra_ext)
+ENP.sp <- as(ENP, 'Spatial')
 
 # Import predictor layers, create raster stack, normalize variables and create dataframe
-Risk <- raster('Layers/Mean_Risk.tif')
-road_dens <- raster('Layers/Road_Density.tif')
-Green <- raster(paste0('Layers/Greenness_', date_list[1], ".tif"))
-Wet <- raster(paste0('Layers/Wetness_', date_list[1], ".tif"))
+Risk <- raster('Layers/Mean_Risk.tif') %>% 
+  mask(ENP.sp)
+road_dens <- raster('Layers/Road_Density.tif') %>% 
+  mask(ENP.sp)
+Green <- raster(paste0('Layers/Greenness_', date_list[1], ".tif")) %>% 
+  mask(ENP.sp)
+Wet <- raster(paste0('Layers/Wetness_', date_list[1], ".tif")) %>% 
+  mask(ENP.sp)
 
 pred_stack <- stack(Green, Wet, road_dens, Risk)
 
@@ -276,21 +359,53 @@ pred_df <- as.data.frame(norm_stack)
 pred_df$fix <- 1
 pred_df$ID <- "AG068_2009"
 
+pred_bg <- raster(norm_stack@layers[[1]])
+pred_bg[] <- runif(1,0,1)
+v_bg <- velox(pred_bg)
+
 #### Data Recorders ####
 
-behav.states <- data.frame(matrix(0,N,days*(steps.per.day/3)))
+behav.states <- list()
+all.steps <- list()
 
 #### Initialization ####
 
+HMMs <- HMM(data = all_data, states = 3)
+trans.mat <- HMMs$mle$gamma
+ranges <- extract.ranges(HMMs, states = 3)
+
 LIZs <- weighted_sampling(input.raster = Risk, N = 200)
 SSFs <- selection_functions(name.list = name_list)
+strt <- Sys.time()
 agents <- initialize.agents(N=20, sp.mean=350, SSFs, norm_stack, pred_df)
+print(Sys.time() - strt)
 
 #### Model Implementation ###
 
-prev.state <- agents[[1]]$behav.state
-new.states <- state.shift(N, prev.state, trans.mat)
-behav.states[,1] <- new.states
+N = 20
+days = 90
+t = days*24*3
+crs <- "+proj=utm +south +zone=33 +ellps=WGS84"
+init.state <- agents[[1]]$behav.state
+behav.states[[1]] <- init.state
+init.step <- agents[[1]][,c('x','y')]
+all.steps[[1]] <- init.step
+
+for (z in 2:t) {
+  # Assign new states and add results to behav.states tracker
+  prev.state <- behav.states[[z-1]]
+  new.states <- state.shift(N, prev.state, trans.mat)
+  behav.states[[z]] <- new.states[,1]
+  # Find new positions and add results to all.steps tracker
+  strt <- Sys.time()
+  step <- move.func(N, agents, sp.mean=350, ranges, crs, v_bg)
+  print(Sys.time() - strt)
+  all.steps[[z]] <- step
+  # Update agents object with new states and positions
+  agents[[1]]$behav.state <- new.states
+  agents[[1]]$x <- step[,1]
+  agents[[1]]$y <- step[,2]
+}
 
 #################################################################
 
