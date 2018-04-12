@@ -1,11 +1,22 @@
-risk09 <- raster('Layers/Anthrax_Risk_noNA_2009.tif')
-risk10 <- raster('Layers/Anthrax_Risk_noNA_2010.tif')
+risk09 <- raster('Layers/Anthrax_Risk_2009.tif')
+risk10 <- raster('Layers/Anthrax_Risk_2010.tif')
 risk_mean <- mean(risk09, risk10)
 writeRaster(risk_mean, 'Layers/Mean_Risk.tif', format='GTiff')
 
+wet09 <- raster('Layers/Mean_Wetness_2009.tif')
+wet10 <- raster('Layers/Mean_Wetness_2010.tif')
+wet_mean <- mean(wet09, wet10)
+writeRaster(wet_mean, 'Layers/Mean_Wetness.tif', format='GTiff')
+
+green09 <- raster('Layers/Mean_Greenness_2009.tif')
+green10 <- raster('Layers/Mean_Greenness_2010.tif')
+green_mean <- mean(green09, green10)
+writeRaster(green_mean, 'Layers/Mean_Greenness.tif', format='GTiff')
+
 #################################################################
 
-date_list = c('20160213', '20160325', '20160426', '20160528', '20160629')
+#date_list = c('20160309', '20160410', '20160512', '20160613')
+date_list = c('20120203', '20120306', '20120407', '20120509')
 
 zebra09 <- read_csv("Zebra_Data/Zebra_Anthrax_2009_Cleaned.csv") %>% 
   dplyr::select(x,y,date,ID) %>% 
