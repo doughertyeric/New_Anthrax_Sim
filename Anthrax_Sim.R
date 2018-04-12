@@ -3,6 +3,12 @@ library(survival)
 library(tidyverse)
 library(moveHMM)
 library(rgeos)
+library(foreach)
+library(doParallel)
+library(sf)
+library(velox)
+library(truncnorm)
+library(fasterize)
 
 ####################################################################
 ############                Functions                 ##############
@@ -79,6 +85,57 @@ HMM <- function(data, states = 3) {
   return(mod)
 }
 
+build.stack <- function(date_list, mask.sp) {
+  
+  stack_list <- list()
+  
+  # Import predictor layers, create raster stack, normalize variables and create dataframe
+  Risk <- raster('Layers/Mean_Risk.tif') %>% 
+    mask(mask.sp)
+  road_dens <- raster('Layers/Road_Density.tif') %>% 
+    mask(mask.sp)
+  Green <- raster('Layers/Mean_Greenness.tif') %>% 
+    mask(mask.sp)
+  Wet <- raster('Layers/Mean_Wetness.tif') %>% 
+    mask(mask.sp)
+  
+  original_stack <- stack(Green, Wet, road_dens, Risk)
+  
+  original_means <- cellStats(original_stack, stat='mean', na.rm=TRUE)
+  original_sd <- cellStats(original_stack, stat='sd', na.rm=TRUE)
+  
+  k = 1
+  for (i in 1:length(date_list)) {
+    for (j in 1:length(date_list)) {
+      Green <- raster(paste0('Layers/Greenness_', date_list[i], '.tif')) %>% 
+        mask(mask.sp)
+      Wet <- raster(paste0('Layers/Wetness_', date_list[j], '.tif')) %>% 
+        mask(mask.sp)
+      
+      new_stack <- stack(Green, Wet, road_dens, Risk)
+      new_means <- cellStats(new_stack, stat='mean', na.rm=TRUE)
+      new_sd <- cellStats(new_stack, stat='sd', na.rm=TRUE)
+      
+      norm_stack <- stack((Green - original_means[1]) / original_sd[1],
+                          (Wet - original_means[2]) / original_sd[2],
+                          (road_dens - original_means[3])/ original_sd[3],
+                          (Risk - original_means[4])/ original_sd[4])
+      
+      norm_stack <- stack(norm_stack@layers[[1]],
+                          norm_stack@layers[[2]],
+                          norm_stack@layers[[3]],
+                          norm_stack@layers[[4]])
+      names(norm_stack) <- c("Green_Norm", "Wet_Norm", "Road_Dens_Norm", "Risk_Norm")
+      assign(paste0("stack_Green0",i,"_Wet0",j), norm_stack)
+      
+      stack_list[[k]] <- get(paste0("stack_Green0",i,"_Wet0",j))
+      print(k)
+      k = k + 1
+    }
+  }
+  return(stack_list)
+}
+
 initialize.states <- function(N) {
   state.vector <- data.frame(matrix(0,N,1))
   for (i in 1:N) {
@@ -95,7 +152,8 @@ initialize.states <- function(N) {
   return(state.vector)
 }
 
-initialize.agents <- function(N, sp.mean, SSFs, input.stack, pred_df) {
+# Need to consider how to accurately model individual variation in selection
+initialize.agents <- function(N, sp.mean, SSFs, input.stack, add.mask) {
   
   traits <- data.frame(matrix(0,N,6)) #traitframe
   state.vector <- initialize.states(N)
@@ -105,21 +163,28 @@ initialize.agents <- function(N, sp.mean, SSFs, input.stack, pred_df) {
   # Loop over individuals of a given species
   for (j in 1:N) {
     
+    forage_clogit <- SSFs[[1]]
+    directed_clogit <- SSFs[[2]]
+    
     # Derive individual preference maps based on selection function
     foraging.coeff <- SSFs[[1]]$coefficients
     directed.coeff <- SSFs[[2]]$coefficients
     
-    new.foraging.coeff <- foraging.coeff + rnorm(4,0,0.05)
-    new.directed.coeff <- directed.coeff + rnorm(4,0,0.05)
+    new.foraging.coeff <- foraging.coeff + rnorm(4,0,0.05) ####
+    new.directed.coeff <- directed.coeff + rnorm(4,0,0.05) ####
     
-    SSFs[[1]]$coefficients <- new.foraging.coeff
-    SSFs[[2]]$coefficients <- new.directed.coeff
+    forage_clogit$coefficients <- new.foraging.coeff
+    directed_clogit$coefficients <- new.directed.coeff
   
     pred <- raster(input.stack@layers[[1]])
     pred[] <- 0
     
-    forage_pred <- predict(object=SSFs[[1]], newdata=pred_df, type='risk')
-    directed_pred <- predict(object=SSFs[[2]], newdata=pred_df, type='risk')
+    pred_df <- as.data.frame(input.stack)
+    pred_df$fix <- 1
+    pred_df$ID <- "AG068_2009"
+    
+    forage_pred <- predict(object=forage_clogit, newdata=pred_df, type='risk')
+    directed_pred <- predict(object=directed_clogit, newdata=pred_df, type='risk')
     
     pred@data@values <- forage_pred
     pred <- pred/(1 + pred)
@@ -133,12 +198,13 @@ initialize.agents <- function(N, sp.mean, SSFs, input.stack, pred_df) {
     
     current.state <- state.vector[j,1]
     
-    # Use individual selection raster to probabilistically set starting location location
+    # Use individual selection raster to probabilistically set starting location
     if (current.state < 3) {
       selection.raster <- v_forage$as.RasterLayer(band=1)
     } else if (current.state == 3) {
       selection.raster <- v_directed$as.RasterLayer(band=1)
     }
+    #selection.raster <- mask(selection.raster, add.mask)
     x <- getValues(selection.raster)
     x[is.na(x)] <- 0
     cellID <- sample(nrow(selection.raster)*ncol(selection.raster), size=1, prob=x)
@@ -148,8 +214,22 @@ initialize.agents <- function(N, sp.mean, SSFs, input.stack, pred_df) {
     points <- data.frame(rasterToPoints(rast.temp, fun=function(x){x == 1}))[,1:2]
     points[1,1] <- points[1,1] + runif(1,-14.99,14.99)
     points[1,2] <- points[1,2] + runif(1,-14.99,14.99)
-    #points <- SpatialPoints(points)
-  
+    points <- st_as_sf(points, coords=1:2)
+    st_crs(points) <- 32733
+    
+    while (nrow(st_intersection(points, add.mask)) != 0) {
+      cellID <- sample(nrow(selection.raster)*ncol(selection.raster), size=1, prob=x)
+      rast.temp <- raster(selection.raster)
+      rast.temp[cellID] <- 1
+      
+      points <- data.frame(rasterToPoints(rast.temp, fun=function(x){x == 1}))[,1:2]
+      points[1,1] <- points[1,1] + runif(1,-14.99,14.99)
+      points[1,2] <- points[1,2] + runif(1,-14.99,14.99)
+      points <- st_as_sf(points, coords=1:2)
+      st_crs(points) <- 32733
+    }
+    
+    points <- data.frame(st_coordinates(points$geometry))
     size <- rnorm(1,sp.mean,sp.mean/8) 
     infected <- 0
 
@@ -247,7 +327,7 @@ movement <- function(xy, step, heading) {
   return(move.temp)
 }
 
-move.func <- function(N, inds, sp.mean, ranges, crs, v_bg) {
+move.func <- function(N, inds, sp.mean, radii, crs, v_bg) {
   
   moves <- data.frame(matrix(0,N,2))
   state.vector <- inds[[1]][,'behav.state']
@@ -257,7 +337,7 @@ move.func <- function(N, inds, sp.mean, ranges, crs, v_bg) {
     curr.pos <- data.frame(inds[[1]][j,c('x','y')])
     curr.pos <- st_as_sf(curr.pos, coords = 1:2, crs = crs)
     curr.state <- state.vector[j]
-    radius <- ranges[curr.state,3]
+    radius <- radii[curr.state]
     percep.range <- (body.size[j]/sp.mean) * radius
     perception <- st_buffer(curr.pos, dist=percep.range)
     
@@ -275,8 +355,9 @@ move.func <- function(N, inds, sp.mean, ranges, crs, v_bg) {
       st_as_sf(coords=1:2, crs=crs) %>%
       st_intersection(., perception)
     
-    nearby <- v_selection$extract(perception, df=TRUE)
-    temp.pt <- sample(1:nrow(nearby), size=1, prob = nearby[,2])
+    nearby <- v_selection$extract_points(coords)
+    nearby[is.na(nearby)] <- 0
+    temp.pt <- sample(1:nrow(nearby), size=1, prob = nearby[,1])
     cell.center <- coords[temp.pt,] + runif(2, -14.99, 14.99)
     
     # Agents could move to the next cell with some error
@@ -292,13 +373,117 @@ move.func <- function(N, inds, sp.mean, ranges, crs, v_bg) {
   return(moves)
 }
 
+# Need Testing
+
+save.paths <- function(all.steps, N, run.number, t) {
+  all.paths <- list()
+  for (l in 1:N) {
+    ind.steps <- data.frame(matrix(0,length(all.steps),4))
+    start.day <- as.Date("2010/02/01", format="%Y/%m/%d")
+    for (m in 1:length(all.steps)) {
+      pos <- all.steps[[m]]
+      state <- behav.states[[m]]
+      ind.steps[m,1] <- pos[l,1]
+      ind.steps[m,2] <- pos[l,2]
+      ind.steps[m,3] <- state[l]
+      day <- m %/% 72
+      date <- start.day + day
+      hour <- ((m - ((day-1)*72)) %/% 3) - 24
+      hour.char <- if (hour < 10) {paste0("0",hour)} else {as.character(hour)}
+      min <- (m - ((day-1)*72)) %% 3
+      ind.steps[m,4] <- paste0(date, " ", hour.char, ":", if (min==0) {"00"} else {(min*20)})
+    }
+    colnames(ind.steps) <- c('x', 'y', 'state', 'datetime')
+    all.paths[[l]] <- data.frame(ind.steps)
+    #write.csv(ind.steps, paste0("ID",l,"_Steps_Run",run.number,".csv"))
+  }
+  return(all.paths)
+}
+
+sim.paths <- function(pt1, pt2, vmax, time.steps, crs) {
+  sub.v <- vmax/time.steps
+  new.pos <- st_as_sf(pt1, coords=1:2, crs=crs)
+  pt2 <- st_as_sf(pt2, coords=1:2, crs=crs)
+  intermediate.pts <- data.frame(matrix(0,time.steps,2))
+  intermediate.pts[1,] <- st_coordinates(new.pos$geometry)
+  for (n in 2:(time.steps-1)) {
+    origin.circle.rad <- sub.v*n
+    origin.circle <- st_buffer(new.pos, dist=origin.circle.rad)
+    destination.circle.rad <- sub.v*(time.steps-n)
+    destination.circle <- st_buffer(pt2, dist=destination.circle.rad)
+    new.pos.region <- st_intersection(origin.circle, destination.circle)
+    new.pt = st_sample(new.pos.region, size=10, type='random')
+    intermediate.pts[n,] <- st_coordinates(new.pt[[1]])
+  }
+  intermediate.pts[time.steps,] <- st_coordinates(pt2$geometry)
+  colnames(intermediate.pts) <- c('x', 'y')
+  return(intermediate.pts)
+}
+
+intermediate.steps <- function(xy, state.vector) {
+  path.dens <- data.frame(matrix(0,0,2))
+  for (i in 1:(nrow(xy) - 1)) {
+    dist.x <- abs(xy[i,1] - xy[(i+1),1])
+    dist.y <- abs(xy[i,2] - xy[(i+1),2])
+    current.dist <- sqrt(dist.x^2 + dist.y^2)
+    
+    v_max <- rtruncnorm(n=1,mean=1.1,sd=0.05,a=1.01)*current.dist
+    path.dens.temp <- sim.paths(xy[i,], xy[(i+1),], v_max, 21, crs)
+    path.dens <- data.frame(rbind(path.dens, path.dens.temp))
+    print(i)
+  }
+  return(path.dens)
+}
+
+LIZ.layer <- function(LIZs, mask.sp, crs) {
+  LIZ.df <- data.frame(matrix(0,nrow(LIZs@coords),5))
+  
+  for (m in 1:nrow(LIZs@coords)) {
+    LIZ.df[m,1] <- LIZs@coords[m,1]
+    LIZ.df[m,2] <- LIZs@coords[m,2]
+    LIZ.df[m,3] <- floor(runif(1,1,3.9999)) #years since death
+    rand <- runif(1,0,1)
+    if (rand < 0.826590) { #Probability of springbok
+      LIZ.df[m,4] <- 1
+      LIZ.df[m,5] <- rnorm(1, 350, (350/8)) # body size
+    } else if (rand > 0.826589 && rand < 0.974950) {
+      LIZ.df[m,4] <- 2
+      LIZ.df[m,5] <- rnorm(1, 35, (35/8))
+    } else {
+      LIZ.df[m,4] <- 3
+      LIZ.df[m,5] <- rnorm(1, 3500, (3500/8))
+    }
+  }
+  
+  LIZ_sf <- st_as_sf(LIZ.df, coords=1:2, crs=crs)
+  
+  buffers <- c()
+  for (i in 1:nrow(LIZ.df)) {
+    age <- LIZ.df[i,3]
+    size.factor <- log(LIZ.df[i,5])/log(350)
+    buffers[i] <- size.factor * (rnorm(1, (3 * (4 - age)), ((3 * (4 - age))/8)))
+  }
+  buffers.sp <- st_buffer(LIZ_sf, dist = buffers)
+  
+  area.extent <- extent(mask.sp)
+  r <- raster(area.extent)
+  projection(r) <- CRS(crs)
+  res(r) <- c(3,3)
+  
+  LIZ.layer <- fasterize(buffers.sp, r, background=0)
+  
+  return(LIZ.layer)
+}
+
 ####################################################################
 
 name_list = c('AG059_2009', 'AG061_2009', 'AG062_2009', 'AG063_2009',
               'AG068_2009', 'AG063_2010', 'AG068_2010', 'AG252_2010',
               'AG253_2010', 'AG255_2010', 'AG256_2010')
 
-date_list = c('20160213', '20160325', '20160426', '20160528', '20160629')
+#date_list = c('20160309', '20160410', '20160512', '20160613')
+#date_list = c('20120203', '20120306', '20120407', '20120509')
+date_list = c('20120306', '20120407', '20120509')
 
 # Run general HMM across all 11 zebra tracks during the anthrax season
 zebra09 <- read_csv("Zebra_Data/Zebra_Anthrax_2009_Cleaned.csv") %>% 
@@ -329,67 +514,66 @@ ENP <- st_transform(ENP, '+init=epsg:32733') %>%
   st_union(.) %>% st_intersection(zebra_ext)
 ENP.sp <- as(ENP, 'Spatial')
 
-# Import predictor layers, create raster stack, normalize variables and create dataframe
+pans <- read_sf('Layers/enp pans.shp')
+pans_crs <- st_crs(pans, '+proj=longlat')
+st_crs(pans) <- pans_crs
+pans <- st_transform(pans, '+init=epsg:32733') %>%
+  st_union(.) %>% st_intersection(zebra_ext)
+pans.sp <- as(pans, 'Spatial')
+
+ENP_nopans <- st_difference(ENP, pans) %>% 
+  st_union %>% 
+  st_sf() %>%
+  as('Spatial')
+
+#### Overarching Objects/Parameters ####
+
+#HMMs <- HMM(data = all_data, states = 3)
+HMMs <- readRDS('Population_Hidden_Markov_Model.rds')
+trans.mat <- HMMs$mle$gamma
+ranges <- extract.ranges(HMMs, states = 3)
+radii <- as.vector(ranges$radius)
+
+#env_covariates <- build.stack(date_list, ENP.sp)
+env_covariates <- readRDS('Covariate_Stacks_Reduced.rds')
+
+#### Initialization ####
+
+k = 1
+norm_stack <- env_covariates[[k]]
 Risk <- raster('Layers/Mean_Risk.tif') %>% 
   mask(ENP.sp)
-road_dens <- raster('Layers/Road_Density.tif') %>% 
-  mask(ENP.sp)
-Green <- raster(paste0('Layers/Greenness_', date_list[1], ".tif")) %>% 
-  mask(ENP.sp)
-Wet <- raster(paste0('Layers/Wetness_', date_list[1], ".tif")) %>% 
-  mask(ENP.sp)
-
-pred_stack <- stack(Green, Wet, road_dens, Risk)
-
-stack_means <- cellStats(pred_stack, stat='mean', na.rm=TRUE)
-stack_sd <- cellStats(pred_stack, stat='sd', na.rm=TRUE)
-
-norm_stack <- stack((Green - stack_means) / stack_sd[1],
-                    (Wet - stack_means[2]) / stack_sd[2],
-                    (road_dens - stack_means[3])/ stack_sd[3],
-                    (Risk - stack_means[4])/ stack_sd[4])
-
-norm_stack <- stack(norm_stack@layers[[1]],
-                    norm_stack@layers[[2]],
-                    norm_stack@layers[[3]],
-                    norm_stack@layers[[4]])
-names(norm_stack) <- c("Green_Norm", "Wet_Norm", "Road_Dens_Norm", "Risk_Norm")
-
-pred_df <- as.data.frame(norm_stack)
-pred_df$fix <- 1
-pred_df$ID <- "AG068_2009"
-
-pred_bg <- raster(norm_stack@layers[[1]])
-pred_bg[] <- runif(1,0,1)
-v_bg <- velox(pred_bg)
+LIZs <- weighted_sampling(input.raster = Risk, N = 200)
+SSFs <- selection_functions(name.list = name_list)
+strt <- Sys.time()
+agents <- initialize.agents(N=60, sp.mean=350, SSFs, norm_stack, pans)
+#agents <- readRDS('Initialized_Agents_N60_Green01_Wet01.rds')
+print(Sys.time() - strt)
 
 #### Data Recorders ####
 
 behav.states <- list()
 all.steps <- list()
 
-#### Initialization ####
-
-HMMs <- HMM(data = all_data, states = 3)
-trans.mat <- HMMs$mle$gamma
-ranges <- extract.ranges(HMMs, states = 3)
-
-LIZs <- weighted_sampling(input.raster = Risk, N = 200)
-SSFs <- selection_functions(name.list = name_list)
-strt <- Sys.time()
-agents <- initialize.agents(N=20, sp.mean=350, SSFs, norm_stack, pred_df)
-print(Sys.time() - strt)
-
 #### Model Implementation ###
 
-N = 20
-days = 90
+N = 60
+days = 1
 t = days*24*3
 crs <- "+proj=utm +south +zone=33 +ellps=WGS84"
 init.state <- agents[[1]]$behav.state
 behav.states[[1]] <- init.state
 init.step <- agents[[1]][,c('x','y')]
 all.steps[[1]] <- init.step
+norm_stack <- env_covariates[[k]]
+
+pred_bg <- raster(norm_stack@layers[[1]])
+pred_bg[] <- runif(1,0,1)
+v_bg <- velox(pred_bg)
+
+#num_cores <- detectCores()
+#cl<-makeCluster((num_cores - 1))
+#registerDoParallel(cl)
 
 for (z in 2:t) {
   # Assign new states and add results to behav.states tracker
@@ -398,11 +582,12 @@ for (z in 2:t) {
   behav.states[[z]] <- new.states[,1]
   # Find new positions and add results to all.steps tracker
   strt <- Sys.time()
-  step <- move.func(N, agents, sp.mean=350, ranges, crs, v_bg)
-  print(Sys.time() - strt)
+  step <- move.func(N, agents, sp.mean=350, radii, crs, v_bg)
+  #step <- move.func.par(N, agents, sp.mean=350, radii, crs, v_bg)
+  print(paste(Sys.time() - strt,':',z))
   all.steps[[z]] <- step
   # Update agents object with new states and positions
-  agents[[1]]$behav.state <- new.states
+  agents[[1]]$behav.state <- new.states[,1]
   agents[[1]]$x <- step[,1]
   agents[[1]]$y <- step[,2]
 }
