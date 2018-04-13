@@ -546,7 +546,7 @@ Risk <- raster('Layers/Mean_Risk.tif') %>%
 LIZs <- weighted_sampling(input.raster = Risk, N = 200)
 SSFs <- selection_functions(name.list = name_list)
 strt <- Sys.time()
-agents <- initialize.agents(N=60, sp.mean=350, SSFs, norm_stack, pans)
+agents <- initialize.agents(N=20, sp.mean=350, SSFs, norm_stack, pans)
 #agents <- readRDS('Initialized_Agents_N60_Green01_Wet01.rds')
 print(Sys.time() - strt)
 
@@ -557,7 +557,7 @@ all.steps <- list()
 
 #### Model Implementation ###
 
-N = 60
+N = 20
 days = 1
 t = days*24*3
 crs <- "+proj=utm +south +zone=33 +ellps=WGS84"
@@ -583,7 +583,6 @@ for (z in 2:t) {
   # Find new positions and add results to all.steps tracker
   strt <- Sys.time()
   step <- move.func(N, agents, sp.mean=350, radii, crs, v_bg)
-  #step <- move.func.par(N, agents, sp.mean=350, radii, crs, v_bg)
   print(paste(Sys.time() - strt,':',z))
   all.steps[[z]] <- step
   # Update agents object with new states and positions
@@ -594,6 +593,15 @@ for (z in 2:t) {
 
 #################################################################
 
+test_path <- test_out[[1]][[1]]
+test_path$ID <- 1
+for (i in 2:10) {
+  temp_path <- test_out[[1]][[i]]
+  temp_path$ID <- i
+  test_path <- rbind(test_path, temp_path)
+}
 
+test_HMM <- HMM(data = test_path, states = 3)
+print(test_HMM$ml$stepPar[1,])
 
 
