@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ABM_Test
-#SBATCH --partition=savio
+#SBATCH --partition=savio2_bigmem
 #SBATCH --account=fc_mgenes
 #SBATCH --qos=savio_normal
 #SBATCH --ntasks=1

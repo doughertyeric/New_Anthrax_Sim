@@ -1,6 +1,9 @@
 library(raster)
 library(survival)
-library(tidyverse)
+library(moveHMM)
+library(dplyr)
+library(magrittr)
+library(readr)
 library(rgeos)
 library(foreach)
 library(doParallel)
@@ -57,6 +60,24 @@ ENP_nopans <- st_difference(ENP, pans) %>%
 
 env_covariates <- readRDS('Covariate_Stacks_Reduced.rds')
 HMMs <- readRDS('Population_Hidden_Markov_Model.rds')
+
+extract.ranges <- function(HMM.out, states = 3) {
+  ranges <- data.frame(matrix(0,states,3))
+  for (i in 1:states) {
+    step.mean <- HMM.out$mle[[1]][1,i]
+    step.sd <- HMM.out$mle[[1]][2,i]
+    step.shape <- (step.mean^2)/(step.sd^2)
+    step.rate <- step.mean/(step.sd^2)
+    radius <- qgamma(0.975, shape=step.shape, rate=step.rate)
+    
+    ranges[i,1] <- step.shape
+    ranges[i,2] <- step.rate
+    ranges[i,3] <- radius
+  }
+  colnames(ranges) <- c('gamma.shape', 'gamma.rate', 'radius')
+  return(ranges)
+}
+
 trans.mat <- HMMs$mle$gamma
 ranges <- extract.ranges(HMMs, states = 3)
 radii <- as.vector(ranges$radius)
@@ -67,11 +88,11 @@ radii <- as.vector(ranges$radius)
 ####################################################################
 
 num_cores <- detectCores()
-cl <- makeCluster(num_cores, outfile = '')
+cl <- makeCluster(9, outfile = '')
 registerDoParallel(cl)
 
 # Begin parallel loop to create movement paths for N agents over each of the k stacks
-loop_out <- foreach(k = 1:9, .packages=c('raster', 'survival', 'tidyverse', 'sf', 'rgeos', 'velox')) %dopar% {
+loop_out <- foreach(k = 1:9, .packages=c('raster', 'survival', 'dplyr', 'magrittr', 'readr', 'sf', 'rgeos', 'velox')) %dopar% {
   
   selection_functions <- function(name.list) {
     forage <- read.csv(paste0('Zebra_Data/', name.list[1], "_Foraging_Final.csv"))
@@ -302,7 +323,7 @@ loop_out <- foreach(k = 1:9, .packages=c('raster', 'survival', 'tidyverse', 'sf'
     mask(ENP.sp)
   SSFs <- selection_functions(name.list = name_list)
   strt <- Sys.time()
-  agents <- initialize.agents(N=60, sp.mean=350, SSFs, norm_stack, pans)
+  agents <- initialize.agents(N=10, sp.mean=350, SSFs, norm_stack, pans)
   print(Sys.time() - strt)
   
   #### Data Recorders ####
@@ -312,7 +333,7 @@ loop_out <- foreach(k = 1:9, .packages=c('raster', 'survival', 'tidyverse', 'sf'
   
   #### Model Implementation ###
   
-  N = 20
+  N = 10
   days = 1
   t = days*24*3
   crs <- "+proj=utm +south +zone=33 +ellps=WGS84"
