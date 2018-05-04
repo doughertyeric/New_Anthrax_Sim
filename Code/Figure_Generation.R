@@ -145,3 +145,53 @@ ggplot() + geom_histogram(aes(x=rnorm(1000,mean(true_directed_mu),sd(true_direct
    geom_histogram(data=all.step.means, aes(x=directed.mu, fill=k), bins=20) +
    xlab('Mean Step Length (Directed)') + ylab('Frequency')
 dev.off()
+
+#######################################################
+
+layers <- read.csv('Layer_Stats.csv')
+
+pdf('Figures/Environmental_Covariate_Grid.pdf', width=8, height=6)
+ggplot(data=layers, aes(x=Green, y=Wet)) + 
+  geom_point() + 
+  geom_text(aes(label=ID), nudge_x = 1) + 
+  geom_point(aes(x=-21.00, y=-36.89, size=1), col='red') + 
+  theme_bw() + 
+  theme(legend.position = 'none') + 
+  xlab('Mean Greenness') + 
+  ylab('Mean Wetness')
+dev.off()
+
+########################################################
+
+ENP <- read_sf('Layers/enp fence poly.shp')
+ENP_crs <- st_crs(ENP, '+proj=longlat')
+st_crs(ENP) <- ENP_crs
+ENP <- st_transform(ENP, '+init=epsg:32733') %>%
+     st_union(.) %>% st_intersection(zebra_ext)
+
+pans <- read_sf('Layers/enp pans.shp')
+pans_crs <- st_crs(pans, '+proj=longlat')
+st_crs(pans) <- pans_crs
+pans <- st_transform(pans, '+init=epsg:32733') %>%
+  st_union(.) %>% st_intersection(zebra_ext)
+
+ENP_nopans <- st_difference(ENP, pans) %>% 
+  st_union %>% 
+  st_sf()
+
+LIZ_sf <- read_csv('LIZ_buffers.csv') %>%
+  st_as_sf(coords = 1:2, crs=32733)
+
+pdf('Figures/LIZ_Sites.pdf', width=8, height=6)
+ggplot() + 
+  geom_sf(data=ENP_nopans) + 
+  geom_sf(data=LIZ_sf, aes(color=factor(species,
+                                        levels=c(1,2,3),
+                                        labels=c('Zebra', 'Springbok', 'Elephant')),
+                           stroke=0)) + 
+  theme_bw() + 
+  theme(legend.position = 'none') +
+  #theme(legend.position = 'bottom') + 
+  #guides(color = guide_legend(title="Species")) +
+  coord_sf(crs = st_crs(ENP_nopans), datum = NA)
+dev.off()

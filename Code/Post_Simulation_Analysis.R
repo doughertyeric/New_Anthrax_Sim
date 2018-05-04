@@ -167,7 +167,21 @@ LIZ.objects <- function(LIZ_sf) {
   return(LIZ_sf)
 }
 
+####################################################################
 
+for (i in 2:16) {
+  orig <- readRDS(paste0('Final_Runs_Markov/ABM_Final_Markov_k',i,'.rds'))
+  new <- readRDS(paste0('Final_Runs_Markov/ABM_Final_Markov_k',i,'_part2.rds'))
+  full <- list()
+  for (j in 1:500) {
+    full[[j]] <- orig[[j]]
+  }
+  for (k in 1:500) {
+    full[[(k+500)]] <- new[[k]]
+  }
+  saveRDS(full, paste0('Final_Runs_Markov/ABM_Final_Markov_k',i,'_Full.rds'))
+  print(i)
+}
 
 ####################################################################
 
@@ -182,7 +196,7 @@ all.step.means <- data.frame(matrix(0,0,3))
 colnames(all.step.means) <- c('foraging.mu', 'directed.mu', 'k')
 t.test.results <- data.frame(matrix(0,9,2))
 
-for (k in 1:9) {
+for (k in 2:16) {
 
   all_inds <- readRDS(paste0('Final_Runs_Markov/ABM_Final_Markov_k',k,'_Full.rds'))
   rand.ids <- sample(x=seq(1,1000,1), size=11, replace=FALSE)

@@ -90,7 +90,7 @@ build.stack <- function(date_list, mask.sp) {
   stack_list <- list()
   
   # Import predictor layers, create raster stack, normalize variables and create dataframe
-  Risk <- raster('Layers/Mean_Risk.tif') %>% 
+  Risk <- raster('Layers/Mean_Risk_v2.tif') %>% 
     mask(mask.sp)
   road_dens <- raster('Layers/Road_Density.tif') %>% 
     mask(mask.sp)
@@ -99,7 +99,7 @@ build.stack <- function(date_list, mask.sp) {
   Wet <- raster('Layers/Mean_Wetness.tif') %>% 
     mask(mask.sp)
   
-  original_stack <- stack(Green, Wet, road_dens, Risk)
+  original_stack <- raster::stack(Green, Wet, road_dens, Risk)
   
   original_means <- cellStats(original_stack, stat='mean', na.rm=TRUE)
   original_sd <- cellStats(original_stack, stat='sd', na.rm=TRUE)
@@ -112,16 +112,16 @@ build.stack <- function(date_list, mask.sp) {
       Wet <- raster(paste0('Layers/Wetness_', date_list[j], '.tif')) %>% 
         mask(mask.sp)
       
-      new_stack <- stack(Green, Wet, road_dens, Risk)
+      new_stack <- raster::stack(Green, Wet, road_dens, Risk)
       new_means <- cellStats(new_stack, stat='mean', na.rm=TRUE)
       new_sd <- cellStats(new_stack, stat='sd', na.rm=TRUE)
       
-      norm_stack <- stack((Green - original_means[1]) / original_sd[1],
+      norm_stack <- raster::stack((Green - original_means[1]) / original_sd[1],
                           (Wet - original_means[2]) / original_sd[2],
                           (road_dens - original_means[3])/ original_sd[3],
                           (Risk - original_means[4])/ original_sd[4])
       
-      norm_stack <- stack(norm_stack@layers[[1]],
+      norm_stack <- raster::stack(norm_stack@layers[[1]],
                           norm_stack@layers[[2]],
                           norm_stack@layers[[3]],
                           norm_stack@layers[[4]])
@@ -259,47 +259,65 @@ extract.ranges <- function(HMM.out, states = 3) {
   return(ranges)
 }
 
-move.func <- function(t, start.state, trans.mat, size, sp.mean, start.pos, radii, crs, maps, v_bg) {
-  
-  moves <- data.frame(matrix(0,t,3))
-  colnames(moves) <- c('x', 'y', 'behav.state')
-  moves[1,c('x','y')] <- start.pos
-  moves[1,'behav.state'] <- start.state
-  body.size <- size
-  
-  for (j in 2:t) {
-    prev.pos <- moves[(j-1), c('x','y')]
-    prev.state <- moves[(j-1), 3]
-    new.state <- state.shift(prev.pos, trans.mat)
-    prev.pos <- st_as_sf(prev.pos, coords = 1:2, crs = crs)
-    radius <- radii[new.state[1,1]]
-    percep.range <- (body.size/sp.mean) * radius
-    perception <- st_buffer(prev.pos, dist=percep.range)
+move.func <- function(t, start.state, trans.mat, size, sp.mean, start.pos, small, med, large, crs, maps, v_bg) {
     
-    if (new.state == 2) {
-      v_selection <- maps[[1]][[1]]$copy()
-    } else if (new.state == 3) {
-      v_selection <- maps[[1]][[1]]$copy()
-    } else {
-      v_selection <- v_bg$copy()
-    }
+    moves <- data.frame(matrix(0,t,3))
+    colnames(moves) <- c('x', 'y', 'behav.state')
+    moves[1,c('x','y')] <- start.pos
+    moves[1,'behav.state'] <- start.state
+    body.size <- size
     
-    # Agents move probablistically according to their selection map within their perceptual range
-    v_selection$crop(perception)
-    coords <- data.frame(v_selection$getCoordinates()) %>%
-      st_as_sf(coords=1:2, crs=crs) %>%
-      st_intersection(., perception)
-    
-    nearby <- v_selection$extract_points(coords)
-    nearby[is.na(nearby)] <- 0
-    temp.pt <- sample(1:nrow(nearby), size=1, prob = nearby[,1])
-    cell.center <- coords[temp.pt,] + runif(2, -14.99, 14.99)
+    for (j in 2:t) {
+      prev.pos <- moves[(j-1), c('x','y')]
+      prev.pos <- st_as_sf(prev.pos, coords = 1:2, crs = crs)
+      prev.state <- moves[(j-1), 3]
+      new.state <- state.shift(prev.state, trans.mat)
+      rand <- runif(1,0,1)
+      if (rand <= 0.68) {
+        radius <- small[new.state[1,1]]
+      } else if (rand > 0.68 && rand <= 0.95) {
+        radius <- med[new.state[1,1]]
+      } else {
+        radius <- large[new.state[1,1]]
+      }
+      
+      percep.range <- (body.size/sp.mean) * radius
+      perception <- st_buffer(prev.pos, dist=percep.range)
+      st_crs(perception) <- 32733
 
-    moves[j,c('x','y')] <- st_coordinates(cell.center$geometry)
-    moves[j,'behav.state'] <- new.state
+      if (new.state[1,1] == 2) {
+        v_selection <- maps[[1]][[1]]$copy()
+      } else if (new.state[1,1] == 3) {
+        v_selection <- maps[[1]][[1]]$copy()
+      } else {
+        v_selection <- v_bg$copy()
+      }
+      
+      # Agents move probablistically according to their selection map within their perceptual range
+      v_selection$crop(perception)
+      coords <- data.frame(v_selection$getCoordinates()) %>%
+        st_as_sf(coords=1:2)
+      st_crs(coords) <- 32733
+      coords <- st_intersection(coords, perception)
+
+      if (nrow(coords) != 0) {
+        nearby <- v_selection$extract_points(coords)
+        nearby[is.na(nearby)] <- 0
+        temp.pt <- sample(1:nrow(nearby), size=1, prob = nearby[,1])
+        cell.center <- coords[temp.pt,] + runif(2, -14.99, 14.99)
+      } else {
+        temp.coords <- st_coordinates(prev.pos$geometry)
+        cell.center <- temp.coords + runif(2, -14.99, 14.99)
+        cell.center <- data.frame(cell.center)
+        cell.center <- st_as_sf(cell.center, coords=1:2)
+        st_crs(cell.center) <- 32733
+      }
+
+      moves[j,c('x','y')] <- st_coordinates(cell.center$geometry)
+      moves[j,'behav.state'] <- new.state
+    }
+    return(moves)
   }
-  return(moves)
-}
 
 save.paths <- function(all.steps, N, t) {
   all.paths <- list()
@@ -404,7 +422,8 @@ name_list = c('AG059_2009', 'AG061_2009', 'AG062_2009', 'AG063_2009',
 
 #date_list = c('20160309', '20160410', '20160512', '20160613')
 #date_list = c('20120203', '20120306', '20120407', '20120509')
-date_list = c('20120306', '20120407', '20120509')
+#date_list = c('20120306', '20120407', '20120509')
+date_list = c('20100205', '20100528', '20090525', '20090322')
 
 # Run general HMM across all 11 zebra tracks during the anthrax season
 zebra09 <- read_csv("Zebra_Data/Zebra_Anthrax_2009_Cleaned.csv") %>% 
