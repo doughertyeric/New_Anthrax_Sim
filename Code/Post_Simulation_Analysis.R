@@ -169,7 +169,7 @@ LIZ.objects <- function(LIZ_sf) {
 
 ####################################################################
 
-for (i in 2:16) {
+for (i in 1:16) {
   orig <- readRDS(paste0('Final_Runs_Markov/ABM_Final_Markov_k',i,'.rds'))
   new <- readRDS(paste0('Final_Runs_Markov/ABM_Final_Markov_k',i,'_part2.rds'))
   full <- list()
@@ -196,7 +196,7 @@ all.step.means <- data.frame(matrix(0,0,3))
 colnames(all.step.means) <- c('foraging.mu', 'directed.mu', 'k')
 t.test.results <- data.frame(matrix(0,9,2))
 
-for (k in 2:16) {
+for (k in 1:16) {
 
   all_inds <- readRDS(paste0('Final_Runs_Markov/ABM_Final_Markov_k',k,'_Full.rds'))
   rand.ids <- sample(x=seq(1,1000,1), size=11, replace=FALSE)
@@ -217,6 +217,19 @@ for (k in 2:16) {
   temp <- data.frame(cbind(foraging.mu, directed.mu, rep(k,11)))
   colnames(temp) <- c('foraging.mu', 'directed.mu', 'k')
   all.step.means <- rbind(all.step.means, temp)
+}
+
+#write.csv(all.step.means, 'Final_Runs_Markov/Markov_NoPan_Step_Means_POM.csv')
+all.step.means <- read.csv('Final_Runs_Markov/Markov_NoPan_Step_Means_POM.csv')
+
+means.tab <- data.frame(0,16,4)
+for (i in 1:16) {
+  foraging.mu <- all.step.means$foraging.mu[(((i-1)*11)+1):(((i-1)*11)+11)]
+  directed.mu <- all.step.means$directed.mu[(((i-1)*11)+1):(((i-1)*11)+11)]
+  means.tab[i,1] <- mean(foraging.mu)
+  means.tab[i,2] <- t.test(true_foraging_mu, foraging.mu)$p.value
+  means.tab[i,3] <- mean(directed.mu)
+  means.tab[i,4] <- t.test(true_directed_mu, directed.mu)$p.value
 }
 
 all.step.means$k <- as.factor(all.step.means$k)
@@ -357,11 +370,11 @@ stack <- function(date_list, mask.sp) {
 
 ########################################################
 
-layers <- read.csv('LayerStats.csv')
+layers <- read.csv('Layer_Stats.csv')
 
-for (j in 1:9) {
+for (j in 1:16) {
 
-  all_contacts <- readRDS(paste0('ABM_Contact_List_k',j,'.rds'))
+  all_contacts <- readRDS(paste0('Final_Runs_Markov/ABM_Contact_List_k',j,'.rds'))
 
   temp_list <- list()
   for (i in 1:1000) {
@@ -377,12 +390,19 @@ for (j in 1:9) {
   #   all_contacts[[i]][[1]][1,2] <- contact_rates[i,2]
   # }
   # 
-  # layers$mean[j] <- mean(contact_rates[,2])
-  # layers$sd[j] <- sd(contact_rates[,2])
-  # 
   # saveRDS(all_contacts, paste0('ABM_Contact_List_k',j,'.rds'))
   
+  layers$mean[j] <- mean(contact_rates[,2])
+  layers$sd[j] <- sd(contact_rates[,2])
+  layers$zeros[j] <- as.numeric(table(contact_rates[,2])[1])
+  layers$max[j] <- max(contact_rates[,2])
+  
 }
+
+layers$Wet2 <- layers$Wet^2
+layers$Green2 <- layers$Green^2
+
+#write.csv(layers, 'Layers_All_Stats.csv')
 
 ###########################################################
 

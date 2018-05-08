@@ -1,5 +1,7 @@
 library(ggplot2)
 library(ggpubr)
+library(grid)
+library(gridExtra)
 
 ########################################################
 ########     Perceptual Range Schematic         ########
@@ -130,7 +132,7 @@ true_foraging_mu <- c(193.6, 78.3, 68, 188.1, 173.4, 205.6,
 true_directed_mu <- c(853.8, 405.8, 386.4, 758, 907.7, 818.9,
                       852, 600.1, 785.5, 560.1, 581.8)
 
-all.step.means <- read.csv('Markov_Step_Means_POM.csv')
+all.step.means <- read.csv('Final_Runs_Markov/Markov_NoPan_Step_Means_POM.csv')
 
 all.step.means$k <- as.factor(all.step.means$k)
 
@@ -194,4 +196,110 @@ ggplot() +
   #theme(legend.position = 'bottom') + 
   #guides(color = guide_legend(title="Species")) +
   coord_sf(crs = st_crs(ENP_nopans), datum = NA)
+dev.off()
+
+#########################################################
+###########             Results                 #########
+#########################################################
+
+quad.lm <- lm(mean ~ Wet + Wet2, data=layers)
+wetvals <- seq(-80,-20,1)
+pred.list <- list(Wet=wetvals, Wet2=wetvals^2)
+predicted <- predict(quad.lm, pred.list)
+
+pred <- data.frame(cbind(Wet=wetvals, Wet2=wetvals^2,
+                         ContactRate = predicted))
+
+p1 <- ggplot() + 
+  geom_point(data=layers, aes(x=-Wet, y=mean)) +
+  geom_line(data=pred, aes(x=-Wet, y=ContactRate)) + 
+  scale_x_continuous(labels = c('Wet', 'Moderately Wet',
+                                'Moderately Dry', 'Dry')) +
+  ylab('Mean Contact Rate') + xlab('Mean Wetness') +
+  theme_bw()
+
+pdf('Figures/Contact_Rate_Trend.pdf', width=8, height=4)
+p1
+dev.off()
+
+carcass <- read_csv('Carcass_Data.csv') %>%
+  filter(BAPos == 'POS') %>%
+  dplyr::select(edod, Species, BAPos) %>%
+  mutate(Month = lubridate::month(edod),
+         Year = lubridate::year(edod)) %>%
+  filter(Month > 1) %>%
+  filter(Month < 7) %>%
+  filter(Species == "EB")
+
+carcass$Month <- factor(carcass$Month,
+                        levels=c(2,3,4,5,6),
+                        labels = c('Feb', 'Mar', 'Apr',
+                                   'May', 'Jun'))
+
+p2 <- ggplot() +
+  geom_histogram(data=carcass, aes(x=Month), stat='count') +
+  ylab('Confirmed Anthrax Mortalities') + xlab('Month')
+
+carcass <- read_csv('ENP_carcasses.csv') %>%
+  dplyr::select(DATE, SPECIES) %>%
+  mutate(Date = lubridate::mdy(DATE),
+         Month = lubridate::month(Date),
+         Year = lubridate::year(Date)) %>%
+  filter(Month > 1) %>%
+  filter(Month < 7) %>%
+  filter(SPECIES == "EB") %>%
+  filter(Year > 2003) %>%
+  filter(Year < 2010)
+
+carcass$Month <- factor(carcass$Month,
+                        levels=c(2,3,4,5,6),
+                        labels = c('Feb', 'Mar', 'Apr',
+                                   'May', 'Jun'))
+
+p3 <- ggplot() +
+  geom_histogram(data=carcass, aes(x=Month), stat='count') +
+  ylab('Confirmed Anthrax Mortalities (1996-2009)') + xlab('Month')
+
+pdf('Figures/Contact_Rate_Trend_v2.pdf', width=8, height=8)
+grid.arrange(p1, p3, ncol=1)
+dev.off()
+
+rainfall <- read_csv('ENP_Monthly_Rain.csv') %>%
+  dplyr::select(Year, Month, Okaukuejo) %>%
+  filter(Month %in% c('feb', 'mar', 'apr',
+                      'may', 'jun')) %>%
+  filter(Year > 1995) %>%
+  filter(Year < 2010) %>%
+  group_by(Month) %>%
+  summarise(avg.rain = mean(Okaukuejo),
+            sd.rain = sd(Okaukuejo),
+            se.rain = sd.rain/n())
+
+rainfall$Month <- factor(rainfall$Month,
+                         levels=c('feb', 'mar', 'apr',
+                                  'may', 'jun'),
+                         labels = c('Feb', 'Mar', 'Apr',
+                                    'May', 'Jun'))
+
+p4 <- ggplot(data=rainfall, aes(x=Month, y=avg.rain)) + 
+  geom_errorbar(aes(ymin=avg.rain-se.rain, ymax=avg.rain+se.rain), width=.2) +
+  geom_point() +
+  geom_line(aes(group=1)) +
+  ylab('Mean Rainfall (cm)')
+
+pdf('Figures/Contact_Rate_Trend_v3.pdf', width=8, height=12)
+grid.arrange(p1, p3, p4, ncol=1)
+dev.off()
+
+vp <- viewport(width = 0.35, height = 0.3, 
+               x = 0.8, y = 0.75)
+full <- function() {
+  print(p3)
+  theme_set(theme_bw(base_size = 8))
+  print(p4, vp = vp)
+  theme_set(theme_bw())
+}
+
+pdf('Figures/Mortality_Rainfall.pdf', width=8, height=4)
+full()
 dev.off()
